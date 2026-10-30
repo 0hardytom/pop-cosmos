@@ -549,6 +549,8 @@ def generate_fsps_spec(
         mod,
         wavegrid=None,
         unit='Mgy',
+        emlines=True,
+        neb_continuum=True,
         progress=True
     ):
     """
@@ -572,6 +574,13 @@ def generate_fsps_spec(
         wavelength grid.
     unit : str, optional
         Units to generate SEDs in. One of `('Mgy', 'nMgy', 'Jy', 'muJy')`.
+    emlines : bool, optional
+        If `False`, nebular emission lines are excluded from the spectra.
+        Default is `True`.
+    neb_continuum : bool, optional
+        If `False`, the nebular continuum is excluded from the spectra.
+        If both `emlines` and `neb_continuum` are `False`, nebular emission
+        is switched off entirely (`add_neb_emission=False`). Default is `True`.
     progress : bool, optional
         If `True` shows a progress bar using `tqdm`.
 
@@ -613,6 +622,9 @@ def generate_fsps_spec(
         pfile.run_params['zred'] = thetas[i,-1]
         mod = pfile.load_model(**pfile.run_params)
         mod.params['zred'] = thetas[i,-1]
+        mod.params['nebemlineinspec'] = np.array([emlines])
+        mod.params['add_neb_continuum'] = np.array([neb_continuum])
+        mod.params['add_neb_emission'] = np.array([emlines or neb_continuum])
         # generate spectrum
         spec, _, _ = mod.mean_model(thetas[i,0:-1], sps=sps, obs=obs) # spectrum
         # generate rest-frame wavelength grid if not done already
@@ -783,20 +795,53 @@ class Galaxy:
 
     # ---- spectrum generation ----
 
+    def _fspsFlux(self, idx, wavegrid, emlines=True, nebContinuum=True):
+        """observed-frame wavelength and FSPS flux [nMgy] for the samples in idx"""
+        if self.parent is None:
+            raise RuntimeError('Galaxy has no parent EmceeChain; spectrum generation needs one for the model setup.')
+
+        theta = self.expAGNParams(self.convertNToMass())[idx]
+        pfile, obs, sps, mod = self.parent.fsps
+        _, obsWl, obsSpec = generate_fsps_spec(theta, pfile, obs, sps, mod, wavegrid=wavegrid, unit='nMgy',
+                                               emlines=emlines, neb_continuum=nebContinuum)
+        return np.asarray(obsWl), np.asarray(obsSpec)
+
     def generateFspsSpec(self, returnGrid=False, nDraw=None, seed=None,
                          wavegrid=np.arange(2500, 100000, 1)):
         """FSPS spectrum per chain sample [nMgy]
 
         Returns Spectrum if returnGrid otherwise summary spectra (wavelength, bottom, median, top).
         """
-        if self.parent is None:
-            raise RuntimeError('Galaxy has no parent EmceeChain; spectrum generation needs one for the model setup.')
+        spec = Spectrum(*self._fspsFlux(self.draw(nDraw, seed), wavegrid), label='fsps')
+        return spec if returnGrid else spec.summary()
 
-        theta = self.expAGNParams(self.convertNToMass())[self.draw(nDraw, seed)]
-        pfile, obs, sps, mod = self.parent.fsps
-        _, obsWl, obsSpec = generate_fsps_spec(theta, pfile, obs, sps, mod,
-                                               wavegrid=wavegrid, unit='nMgy')
-        spec = Spectrum(np.asarray(obsWl), np.asarray(obsSpec), label='fsps')
+    def generateFspsNoEmSpec(self, returnGrid=False, nDraw=None, seed=None,
+                             wavegrid=np.arange(2500, 100000, 1), nebContinuum=True):
+        """FSPS spectrum without emission lines per chain sample [nMgy]
+
+        If nebContinuum is False the nebular continuum is also removed (add_neb_emission=False).
+        Returns Spectrum if returnGrid otherwise summary spectra (wavelength, bottom, median, top).
+        """
+        spec = Spectrum(*self._fspsFlux(self.draw(nDraw, seed), wavegrid, emlines=False,
+                                        nebContinuum=nebContinuum),
+                        label='fsps_no_em' if nebContinuum else 'fsps_no_neb')
+        return spec if returnGrid else spec.summary()
+
+    def generateFspsEmlineSpec(self, returnGrid=False, nDraw=None, seed=None,
+                               wavegrid=np.arange(2500, 100000, 1), includeNebContinuum=False):
+        """Emission-line-only FSPS spectrum per chain sample [nMgy]
+
+        Residual between the full and no-emline FSPS spectra, computed per sample
+        before taking percentiles. If includeNebContinuum is True the residual also
+        contains the nebular continuum (baseline has add_neb_emission=False).
+        Returns Spectrum if returnGrid otherwise summary spectra (wavelength, bottom, median, top).
+        """
+        idx = self.draw(nDraw, seed)
+        waveGrid, fluxFull = self._fspsFlux(idx, wavegrid)
+        _, fluxNoEm = self._fspsFlux(idx, wavegrid, emlines=False, nebContinuum=not includeNebContinuum)
+
+        spec = Spectrum(waveGrid, fluxFull - fluxNoEm,
+                        label='fsps_neb' if includeNebContinuum else 'fsps_emlines')
         return spec if returnGrid else spec.summary()
 
     def generateSpeculatorSpec(self, returnGrid=False, nDraw=None, seed=None, nWave=5174):
