@@ -716,6 +716,16 @@ class EmceeChain:
     def __len__(self):
         return self.nGalaxies
 
+    def summarise(self, q=(16, 50, 84)):
+        """Per-galaxy, per-parameter median and asymmetric errors.
+
+        Returns an array of shape (3, n_galaxies, n_params): the first axis is
+        (median, error-, error+), with error- = median - q[0] percentile and
+        error+ = q[2] percentile - median (both positive).
+        """
+        lo, med, hi = np.percentile(self.chainsFlat, q, axis=0)
+        return np.stack([med, med - lo, hi - med])
+
     # expensive model setup loaded once and shared between galaxy classes
     @property
     def fsps(self):
